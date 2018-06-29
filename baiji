@@ -28,7 +28,7 @@ def cmd(*args):
 @cmd(arg("--dist", default = "jessie",       help = "distribution for base docker image"),
      arg("--tag",  default = "baiji:jessie", help = "tag to use for constructed base docker image"),
 )
-def create(args):
+def create_base(args):
     """
     Construct a base Docker image.
 
@@ -55,6 +55,22 @@ def create(args):
     '''.format(args = args))
     if docker.wait():
         sys.exit("Couldn't construct stage 2 base image")
+
+
+@cmd(arg("--tag",  default = "baiji:jessie", help = "tag of base docker image to update"),
+)
+def update_base(args):
+    """
+    Update a base Docker image.
+    """
+
+    docker = subprocess.Popen(("docker", "build", "-t", args.tag, "-"), stdin = subprocess.PIPE)
+    docker.communicate('''\
+        FROM {args.tag}
+        RUN apt-get update && apt-get upgrade -y --with-new-pkgs --no-install-recommends && apt-get autoremove && apt-get clean
+    '''.format(args = args))
+    if docker.wait():
+        sys.exit("Couldn't update image base image")
 
 
 # Parse arguments and dispatch to one of the commands above.
