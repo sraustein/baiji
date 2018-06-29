@@ -1,0 +1,80 @@
+#!/usr/bin/env python
+
+import subprocess
+import argparse
+import tempfile
+import tarfile
+import shutil
+import sys
+
+# Python decorator voodoo to simplify argparse subparser setup.
+
+def arg(*a, **k):
+    return a, k
+
+def cmd(*args):
+    def wrapper(func):
+        def setup(subp):
+            for a, k in args:
+                subp.add_argument(*a, **k)
+            subp.set_defaults(func = func)
+        func._setup_parser = setup
+        return func
+    return wrapper
+
+
+# Commands
+
+@cmd(arg("--dist", default = "jessie",       help = "distribution for base docker image"),
+     arg("--tag",  default = "baiji:jessie", help = "tag to use for constructed base docker image"),
+)
+def create(args):
+    """
+    Construct a base Docker image.
+
+    This is mostly just the output of debootstrap, with a bit of extra
+    setup to include git, build-essentials, and fakeroot.
+    """
+
+    dn = None
+    try:
+        dn = tempfile.mkdtemp()
+        subprocess.check_call(("fakeroot", "/usr/sbin/debootstrap", "--foreign", "--variant=buildd", args.dist, dn))
+        tar = subprocess.Popen(("fakeroot", "tar", "-C", dn, "-c", "."), stdout = subprocess.PIPE)
+        docker = subprocess.Popen(("docker", "import", "-", args.tag), stdin = tar.stdout)
+        if tar.wait() or docker.wait():
+            sys.exit("Couldn't construct stage 1 base image")
+    finally:
+        if dn is not None:
+            shutil.rmtree(dn)
+    docker = subprocess.Popen(("docker", "build", "-t", args.tag, "-"), stdin = subprocess.PIPE)
+    docker.communicate('''\
+        FROM {args.tag}
+        RUN sed -i '/mount -t proc /d; /mount -t sysfs /d' /debootstrap/functions && /debootstrap/debootstrap --second-stage
+        RUN apt-get update && apt-get install -y --no-install-recommends build-essential fakeroot git
+    '''.format(args = args))
+    if docker.wait():
+        sys.exit("Couldn't construct stage 2 base image")
+
+
+# Parse arguments and dispatch to one of the commands above.
+
+def main():
+    HF = type("HF", (argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter), {})
+    parser = argparse.ArgumentParser(formatter_class = HF, description = __doc__)
+    subparsers = parser.add_subparsers(title = "Commands", metavar = "")
+    for name in sorted(globals()):
+        func = globals()[name]
+        try:
+            setup_parser = func._setup_parser
+        except:
+            continue
+        setup_parser(subparsers.add_parser(name.replace("_", "-"),
+                                           formatter_class = HF,
+                                           description = func.__doc__,
+                                           help = (func.__doc__ or "").lstrip().partition("\n")[0]))
+    args = parser.parse_args()
+    args.func(args)
+
+if __name__ == "__main__":
+    main()
