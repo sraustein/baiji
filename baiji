@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 
+import debian.deb822
 import subprocess
 import argparse
 import tempfile
 import tarfile
 import shutil
 import sys
+import os
 
 # Python decorator voodoo to simplify argparse subparser setup.
 
@@ -23,6 +25,46 @@ def cmd(*args):
     return wrapper
 
 
+# Context manager for temporary directories.
+
+class tempdir(object):
+
+    def __enter__(self):
+        self.dn = tempfile.mkdtemp()
+        return self.dn
+
+    def __exit__(self, *oops):
+        shutil.rmtree(self.dn)
+
+# Docker process, mostly a context manager around subprocess.Popen.
+# We could use the native Python Docker interface, but the packaged
+# Debian version of that has a wildly different API than the version
+# on GitHub.
+
+class DockerError(Exception):
+    "Docker returned failure."
+
+class Docker(subprocess.Popen):
+
+    def __init__(self, *args, **kwargs):
+        super(Docker, self).__init__(("docker",) + args, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *oops):
+        status = self.wait()
+        if status and all(o is None for o in oops):
+            raise DockerError()
+
+# Filter which acts like fakeroot for tarfile.TarFile.add() 
+
+def fakeroot_filter(info):
+    info.uname = info.gname = "root"
+    info.uid   = info.gid   = 0
+    return info
+
+
 # Commands
 
 @cmd(arg("--dist", default = "jessie",       help = "distribution for base docker image"),
@@ -36,25 +78,20 @@ def create_base(args):
     setup to include git, build-essentials, and fakeroot.
     """
 
-    dn = None
-    try:
-        dn = tempfile.mkdtemp()
+    with tempdir() as dn:
         subprocess.check_call(("fakeroot", "/usr/sbin/debootstrap", "--foreign", "--variant=buildd", args.dist, dn))
-        tar = subprocess.Popen(("fakeroot", "tar", "-C", dn, "-c", "."), stdout = subprocess.PIPE)
-        docker = subprocess.Popen(("docker", "import", "-", args.tag), stdin = tar.stdout)
-        if tar.wait() or docker.wait():
-            sys.exit("Couldn't construct stage 1 base image")
-    finally:
-        if dn is not None:
-            shutil.rmtree(dn)
-    docker = subprocess.Popen(("docker", "build", "-t", args.tag, "-"), stdin = subprocess.PIPE)
-    docker.communicate('''\
-        FROM {args.tag}
-        RUN sed -i '/mount -t proc /d; /mount -t sysfs /d' /debootstrap/functions && /debootstrap/debootstrap --second-stage
-        RUN apt-get update && apt-get install -y --no-install-recommends build-essential fakeroot git
-    '''.format(args = args))
-    if docker.wait():
-        sys.exit("Couldn't construct stage 2 base image")
+        with Docker("import", "-", args.tag, stdin = subprocess.PIPE) as docker:
+            tar = tarfile.open(mode = "w|", fileobj = docker.stdin)
+            tar.add(dn, ".", filter = fakeroot_filter)
+            tar.close()
+            docker.stdin.close()
+
+    with Docker("build", "-t", args.tag, "-", stdin = subprocess.PIPE) as docker:
+        docker.communicate('''\
+            FROM {args.tag}
+            RUN sed -i '/mount -t proc /d; /mount -t sysfs /d' /debootstrap/functions && /debootstrap/debootstrap --second-stage
+            RUN apt-get update && apt-get install -y --no-install-recommends build-essential fakeroot git
+        '''.format(args = args))
 
 
 @cmd(arg("--tag",  default = "baiji:jessie", help = "tag of base docker image to update"),
@@ -64,13 +101,44 @@ def update_base(args):
     Update a base Docker image.
     """
 
-    docker = subprocess.Popen(("docker", "build", "-t", args.tag, "-"), stdin = subprocess.PIPE)
-    docker.communicate('''\
-        FROM {args.tag}
-        RUN apt-get update && apt-get upgrade -y --with-new-pkgs --no-install-recommends && apt-get autoremove && apt-get clean
-    '''.format(args = args))
-    if docker.wait():
-        sys.exit("Couldn't update image base image")
+    with Docker("build", "-t", args.tag, "-", stdin = subprocess.PIPE) as docker:
+       docker.communicate('''\
+           FROM {args.tag}
+           RUN apt-get update && apt-get upgrade -y --with-new-pkgs --no-install-recommends && apt-get autoremove && apt-get clean
+       '''.format(args = args))
+
+
+@cmd(arg("--tag",           default = "baiji:jessie",                           help = "tag of base docker image to use"),
+     arg("--dsc",           required = True,  type = argparse.FileType("r"),    help = ".dsc file to build"),
+     arg("--local-package", nargs = "+",                                        help = "local packages to make available to build"),
+)
+def build(args):
+    """
+    Build a binary package given a source package.
+
+    In the long run we may want --dsc to be optional, with the implied
+    action of building a source package from the current directory if
+    --dsc isn't specified.  Later.
+    """
+
+    dsc = debian.deb822.Dsc(args.dsc)
+    files = [os.path.join(os.path.dirname(args.dsc.name), f["name"]) for f in dsc["Files"]]
+    dummy = debian.deb822.Deb822()
+    dummy_name = dsc["Source"] + "-build-depends"
+    dummy_fn = "{}_{}_all.deb".format(dummy_name, dsc["Version"])
+    dummy["Depends"] = dsc["Build-Depends"]
+    dummy["Package"] = dummy_name
+    for tag in ("Version", "Maintainer", "Homepage"):
+        dummy[tag] = dsc[tag]
+
+    with tempdir() as dn:
+        equivs = subprocess.Popen(("equivs-build", "/dev/stdin"), stdin = subprocess.PIPE, stdout = subprocess.PIPE, cwd = dn)
+        equivs.communicate(str(dummy))
+        if equivs.wait():
+            sys.exit("Couldn't generate dummy dependency package")
+
+        # Do something useful with generated file here
+        subprocess.check_call(("dpkg", "-c", os.path.join(dn, dummy_fn)))
 
 
 # Parse arguments and dispatch to one of the commands above.
