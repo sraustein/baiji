@@ -54,8 +54,12 @@ class Docker(subprocess.Popen):
         return self
 
     def __exit__(self, *oops):
+        if any(oops):
+            return
+        if self.stdin:
+            self.stdin.close()
         status = self.wait()
-        if status and all(o is None for o in oops):
+        if status:
             raise self.DockerError()
 
 # Filter which acts like fakeroot for tarfile.TarFile.add() 
@@ -71,7 +75,7 @@ def fakeroot_filter(info):
 @cmd(arg("--dist", default = "jessie",       help = "distribution for base docker image"),
      arg("--tag",  default = "baiji:jessie", help = "tag to use for constructed base docker image"),
 )
-def create_base(args):
+def create(args):
     """
     Construct a base Docker image.
 
@@ -82,22 +86,22 @@ def create_base(args):
     with tempdir() as dn:
         subprocess.check_call(("fakeroot", "/usr/sbin/debootstrap", "--foreign", "--variant=buildd", args.dist, dn))
         with Docker("import", "-", args.tag, stdin = subprocess.PIPE) as docker:
-            tar = tarfile.open(mode = "w|", fileobj = docker.stdin)
-            tar.add(dn, ".", filter = fakeroot_filter)
-            tar.close()
-            docker.stdin.close()
+            with tarfile.open(mode = "w|", fileobj = docker.stdin) as tar:
+                tar.add(dn, ".", filter = fakeroot_filter)
 
     with Docker("build", "-t", args.tag, "-", stdin = subprocess.PIPE) as docker:
         docker.communicate(textwrap.dedent('''\
             FROM {args.tag}
             RUN sed -i '/mount -t proc /d; /mount -t sysfs /d' /debootstrap/functions && /debootstrap/debootstrap --second-stage
             RUN apt-get update && apt-get install -y --no-install-recommends build-essential fakeroot git apt-utils
+            RUN useradd -U -m -d /build baiji
+            WORKDIR /build
         '''.format(args = args)))
 
 
 @cmd(arg("--tag",  default = "baiji:jessie", help = "tag of base docker image to update"),
 )
-def update_base(args):
+def update(args):
     """
     Update a base Docker image.
     """
@@ -109,9 +113,11 @@ def update_base(args):
        '''.format(args = args)))
 
 
-@cmd(arg("--tag",           default = "baiji:jessie",                           help = "tag of base docker image to use"),
-     arg("--dsc",           required = True,  type = argparse.FileType("r"),    help = ".dsc file to build"),
-     arg("--local-package", default = [],     nargs = "+",                      help = "local packages to make available to build"),
+@cmd(arg("--tag",               default = "baiji:jessie",                               help = "tag of base docker image to use"),
+     arg("--dsc",               required = True,  type = argparse.FileType("r"),        help = ".dsc file to build"),
+     arg("--local-package",     default = [],     nargs = "+",                          help = "local packages to make available to build"),
+     arg("--reuse-image",       action = "store_true",                                  help = "don't rebuild Docker image"),
+     arg("--just-image",        action = "store_true",                                  help = "don't build, just generate Docker image"),
 )
 def build(args):
     """
@@ -132,38 +138,66 @@ def build(args):
     for tag in ("Version", "Maintainer", "Homepage"):
         dummy[tag] = dsc[tag]
 
-    source_files = [os.path.join(os.path.dirname(args.dsc.name), f["name"]) for f in dsc["Files"]]
-
     build_image = "baiji/build/{}:{}".format(dsc["Source"], dsc["Version"])
 
-    with tempdir() as dn:
-        equivs = subprocess.Popen(("equivs-build", "/dev/stdin"), stdin = subprocess.PIPE, stdout = subprocess.PIPE, cwd = dn)
-        equivs.communicate(str(dummy))
-        if equivs.wait():
-            sys.exit("Couldn't generate dummy dependency package")
+    # Whether and when to rebuild the per-package docker image needs more thought.
+    # For the moment, just manual control, for testing.
 
-        dockerfile_fn = os.path.join(dn, "Dockerfile")
-        with open(dockerfile_fn, "w") as f:
-            f.write(textwrap.dedent('''\
-                FROM {args.tag}
-                COPY micro-apt /micro-apt/
-                RUN  cd /micro-apt && apt-ftparchive packages . > Packages
-                RUN echo 'deb [trusted=yes] file:///micro-apt ./' > /etc/apt/sources.list.d/micro-apt.list
-                RUN apt-get update && apt-get install -y --no-install-recommends {dummy_name} && apt-get clean
-                '''.format(args = args, dummy_name = dummy_name)))
+    if not args.reuse_image:
 
-        with open(dockerfile_fn) as f:
-            sys.stderr.write("# Dockerfile:\n" + f.read() + "\n")
+        with tempdir() as dn:
+            equivs = subprocess.Popen(("equivs-build", "/dev/stdin"), stdin = subprocess.PIPE, stdout = subprocess.PIPE, cwd = dn)
+            equivs.communicate(str(dummy))
+            if equivs.wait():
+                sys.exit("Couldn't generate dummy dependency package")
 
-        with Docker("build", "-t", build_image, "-", stdin = subprocess.PIPE) as docker:
-            tar = tarfile.open(mode = "w|", fileobj = docker.stdin)
-            tar.add(dockerfile_fn, "Dockerfile", filter = fakeroot_filter)
-            for pkg in [os.path.join(dn, dummy_fn)] + args.local_package:
-                tar.add(pkg, os.path.join("micro-apt", os.path.basename(pkg)), filter = fakeroot_filter)
-            tar.close()
-            docker.stdin.close()
+            with open(os.path.join(dn, "Dockerfile"), "w") as f:
+                f.write(textwrap.dedent('''\
+                    FROM {args.tag}
+                    COPY build.sh  /baiji/
+                    COPY micro-apt /micro-apt/
+                    RUN  cd /micro-apt && apt-ftparchive packages . > Packages
+                    RUN  echo 'deb [trusted=yes] file:///micro-apt ./' > /etc/apt/sources.list.d/micro-apt.list
+                    RUN  apt-get update && apt-get install -y --no-install-recommends {dummy_name} && apt-get clean
+                    USER baiji
+                    '''.format(args = args, dummy_name = dummy_name)))
 
-    # Continue here with actual build once we have environment set up
+            with open(os.path.join(dn, "build.sh"), "w") as f:
+                f.write(textwrap.dedent('''\
+                    #!/bin/bash -
+                    set -eo pipefail
+                    arch=`dpkg-architecture -qDEB_BUILD_ARCH`
+                    dpkg-source -x /source/{source}_{version}.dsc
+                    cd {source}-{version}
+                    dpkg-buildpackage -b -uc -us 2>&1 | tee ../{source}_{version}_$arch.build
+                    cd ..
+                    rm -rf {source}-{version}
+                    '''.format(source = dsc["Source"], version = dsc["Version"])))
+
+            with Docker("build", "-t", build_image, "-", stdin = subprocess.PIPE) as docker:
+                with tarfile.open(mode = "w|", fileobj = docker.stdin) as tar:
+                    for fn in ("Dockerfile", "build.sh"):
+                        tar.add(os.path.join(dn, fn), fn, filter = fakeroot_filter)
+                    for pkg in [os.path.join(dn, dummy_fn)] + args.local_package:
+                        tar.add(pkg, os.path.join("micro-apt", os.path.basename(pkg)), filter = fakeroot_filter)
+
+    if not args.just_image:
+
+        container_name = "baiji-build-{}".format(dsc["Source"])
+        dn = os.path.dirname(args.dsc.name)
+
+        with Docker("run", "-i", "--name", container_name, "--network", "none",
+                    "-v", "{}:/source:ro".format(os.path.abspath(dn)),
+                    build_image, "/bin/bash", "-x", "/baiji/build.sh"):
+            pass
+
+        with Docker("cp", "{}:/build/.".format(container_name), "-", stdout = subprocess.PIPE) as docker:
+            with tarfile.open(mode = "r|*", fileobj = docker.stdout) as tar:
+                for member in tar:
+                    fn = os.path.basename(member.name)
+                    if any(fn.endswith(fn2) for fn2 in (".deb", ".changes")):
+                        with open(os.path.join(dn, fn), "w") as f:
+                            f.write(tar.extractfile(member).read())
 
 
 # Parse arguments and dispatch to one of the commands above.
