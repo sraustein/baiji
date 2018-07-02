@@ -199,6 +199,9 @@ def build(args):
                         with open(os.path.join(dn, fn), "w") as f:
                             f.write(tar.extractfile(member).read())
 
+        with Docker("rm", container_name):
+            pass
+
 
 # Parse arguments and dispatch to one of the commands above.
 
