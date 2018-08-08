@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import debian.changelog
 import debian.deb822
 import subprocess
 import textwrap
@@ -72,8 +73,10 @@ def fakeroot_filter(info):
 
 # Commands
 
-@cmd(arg("--dist", default = "jessie",       help = "distribution for base docker image"),
-     arg("--tag",  default = "baiji:jessie", help = "tag to use for constructed base docker image"),
+@cmd(arg("--dist", default = "jessie",
+         help = "distribution for base docker image"),
+     arg("--tag",  default = "baiji:jessie",
+         help = "tag to use for constructed base docker image"),
 )
 def create(args):
     """
@@ -84,7 +87,8 @@ def create(args):
     """
 
     with tempdir() as dn:
-        subprocess.check_call(("fakeroot", "/usr/sbin/debootstrap", "--foreign", "--variant=buildd", args.dist, dn))
+        subprocess.check_call(("fakeroot", "/usr/sbin/debootstrap",
+                               "--foreign", "--variant=buildd", args.dist, dn))
         with Docker("import", "-", args.tag, stdin = subprocess.PIPE) as docker:
             with tarfile.open(mode = "w|", fileobj = docker.stdin) as tar:
                 tar.add(dn, ".", filter = fakeroot_filter)
@@ -92,14 +96,17 @@ def create(args):
     with Docker("build", "-t", args.tag, "-", stdin = subprocess.PIPE) as docker:
         docker.communicate(textwrap.dedent('''\
             FROM {args.tag}
-            RUN sed -i '/mount -t proc /d; /mount -t sysfs /d' /debootstrap/functions && /debootstrap/debootstrap --second-stage
-            RUN apt-get update && apt-get install -y --no-install-recommends build-essential fakeroot git apt-utils
+            RUN sed -i '/mount -t proc /d; /mount -t sysfs /d' /debootstrap/functions && \\
+                /debootstrap/debootstrap --second-stage
+            RUN apt-get update && \\
+                apt-get install -y --no-install-recommends build-essential fakeroot git apt-utils
             RUN useradd -U -m -d /build baiji
             WORKDIR /build
         '''.format(args = args)))
 
 
-@cmd(arg("--tag",  default = "baiji:jessie", help = "tag of base docker image to update"),
+@cmd(arg("--tag",  default = "baiji:jessie",
+         help = "tag of base docker image to update"),
 )
 def update(args):
     """
@@ -109,24 +116,45 @@ def update(args):
     with Docker("build", "-t", args.tag, "-", stdin = subprocess.PIPE) as docker:
        docker.communicate(textwrap.dedent('''\
            FROM {args.tag}
-           RUN apt-get update && apt-get upgrade -y --with-new-pkgs --no-install-recommends && apt-get autoremove && apt-get clean
+           RUN apt-get update && \\
+               apt-get upgrade -y --with-new-pkgs --no-install-recommends && \\
+               apt-get autoremove && \\
+               apt-get clean
        '''.format(args = args)))
 
 
-@cmd(arg("--tag",               default = "baiji:jessie",                               help = "tag of base docker image to use"),
-     arg("--dsc",               required = True,  type = argparse.FileType("r"),        help = ".dsc file to build"),
-     arg("--local-package",     default = [],     nargs = "+",                          help = "local packages to make available to build"),
-     arg("--reuse-image",       action = "store_true",                                  help = "don't rebuild Docker image"),
-     arg("--just-image",        action = "store_true",                                  help = "don't build, just generate Docker image"),
+@cmd(arg("--tag", default = "baiji:jessie",
+         help = "tag of base docker image to use"),
+     arg("--dsc",  type = argparse.FileType("r"),
+         help = ".dsc file to build"),
+     arg("--local-package", default = [], nargs = "+",
+         help = "local packages to make available to build"),
+     arg("--reuse-image", action = "store_true",
+         help = "don't rebuild Docker image"),
+     arg("--just-image", action = "store_true",
+         help = "don't build, just generate Docker image"),
 )
 def build(args):
     """
     Build a binary package given a source package.
 
-    In the long run we may want --dsc to be optional, with the implied
-    action of building a source package from the current directory if
-    --dsc isn't specified.  Later.
+    If no source package supplied, try to build one from the current
+    directory, like debuild.
     """
+
+    if args.dsc is None:
+        try:
+            subprocess.check_call(("dpkg-buildpackage", "-S", "-us", "-uc", "-rfakeroot"))
+        except Exception as e:
+            sys.exit("Couldn't build source package: {!s}".format(e))
+        try:
+            with open("debian/changelog") as f:
+                changelog = debian.changelog.Changelog(f)
+            args.dsc = open("../{}_{}{}.dsc".format(
+                changelog.package, changelog.upstream_version,
+                "" if changelog.debian_revision is None else "-" + changelog.debian_revision))
+        except Exception as e:
+            sys.exit("Couldn't find .dsc file: {!s}".format(e))
 
     dsc = debian.deb822.Dsc(args.dsc)
 
@@ -140,13 +168,19 @@ def build(args):
 
     build_image = "baiji/build/{}:{}".format(dsc["Source"], dsc["Version"])
 
-    # Whether and when to rebuild the per-package docker image needs more thought.
+    # Whether and when to rebuild the per-package docker image needs
+    # more thought.  In theory we could use a hash of the package
+    # version number and source dependency list, but we might also
+    # need the Docker image tags to sort properly, in which case we
+    # probably need to use some kind of timestamp?
+    #
     # For the moment, just manual control, for testing.
 
     if not args.reuse_image:
 
         with tempdir() as dn:
-            equivs = subprocess.Popen(("equivs-build", "/dev/stdin"), stdin = subprocess.PIPE, stdout = subprocess.PIPE, cwd = dn)
+            equivs = subprocess.Popen(("equivs-build", "/dev/stdin"),
+                                      stdin = subprocess.PIPE, stdout = subprocess.PIPE, cwd = dn)
             equivs.communicate(str(dummy))
             if equivs.wait():
                 sys.exit("Couldn't generate dummy dependency package")
@@ -156,9 +190,13 @@ def build(args):
                     FROM {args.tag}
                     COPY build.sh  /baiji/
                     COPY micro-apt /micro-apt/
-                    RUN  cd /micro-apt && apt-ftparchive packages . > Packages
-                    RUN  echo 'deb [trusted=yes] file:///micro-apt ./' > /etc/apt/sources.list.d/micro-apt.list
-                    RUN  apt-get update && apt-get install -y --no-install-recommends {dummy_name} && apt-get clean
+                    RUN  cd /micro-apt && \\
+                         apt-ftparchive packages . > Packages
+                    RUN  cd /etc/apt/sources.list.d && \\
+                         echo 'deb [trusted=yes] file:///micro-apt ./' > micro-apt.list
+                    RUN  apt-get update && \\
+                         apt-get install -y --no-install-recommends {dummy_name} && \\
+                         apt-get clean
                     USER baiji
                     '''.format(args = args, dummy_name = dummy_name)))
 
@@ -179,7 +217,8 @@ def build(args):
                     for fn in ("Dockerfile", "build.sh"):
                         tar.add(os.path.join(dn, fn), fn, filter = fakeroot_filter)
                     for pkg in [os.path.join(dn, dummy_fn)] + args.local_package:
-                        tar.add(pkg, os.path.join("micro-apt", os.path.basename(pkg)), filter = fakeroot_filter)
+                        tar.add(pkg, os.path.join("micro-apt", os.path.basename(pkg)),
+                                filter = fakeroot_filter)
 
     if not args.just_image:
 
@@ -191,7 +230,8 @@ def build(args):
                     build_image, "/bin/bash", "-x", "/baiji/build.sh"):
             pass
 
-        with Docker("cp", "{}:/build/.".format(container_name), "-", stdout = subprocess.PIPE) as docker:
+        with Docker("cp", "{}:/build/.".format(container_name), "-",
+                    stdout = subprocess.PIPE) as docker:
             with tarfile.open(mode = "r|*", fileobj = docker.stdout) as tar:
                 for member in tar:
                     fn = os.path.basename(member.name)
@@ -206,7 +246,8 @@ def build(args):
 # Parse arguments and dispatch to one of the commands above.
 
 def main():
-    HF = type("HF", (argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter), {})
+    HF = type("HF", (argparse.ArgumentDefaultsHelpFormatter,
+                     argparse.RawDescriptionHelpFormatter), {})
     parser = argparse.ArgumentParser(formatter_class = HF, description = __doc__)
     subparsers = parser.add_subparsers(title = "Commands", metavar = "")
     for name in sorted(globals()):
