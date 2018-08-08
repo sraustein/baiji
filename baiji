@@ -7,6 +7,7 @@ import textwrap
 import argparse
 import tempfile
 import tarfile
+import hashlib
 import shutil
 import sys
 import os
@@ -129,8 +130,10 @@ def update(args):
          help = ".dsc file to build"),
      arg("--local-package", default = [], nargs = "+",
          help = "local packages to make available to build"),
-     arg("--reuse-image", action = "store_true",
+     arg("--force-image", action = "store_true",
          help = "don't rebuild Docker image"),
+     arg("--dont-clean", action = "store_true",
+         help = "don't clean up old Docker images"),
      arg("--just-image", action = "store_true",
          help = "don't build, just generate Docker image"),
 )
@@ -171,17 +174,29 @@ def build(args):
     for tag in ("Version", "Maintainer", "Homepage"):
         dummy[tag] = dsc[tag]
 
-    build_image = "baiji/build/{}:{}".format(dsc["Source"], dsc["Version"])
+    build_image_name = "baiji/build/{}/{}".format(dsc["Source"], dsc["Version"])
+    build_image_hash = hashlib.sha1(dummy["Depends"]).hexdigest()
+    build_image      = "{}:{}".format(build_image_name, build_image_hash)
 
-    # Whether and when to rebuild the per-package docker image needs
-    # more thought.  In theory we could use a hash of the package
-    # version number and source dependency list, but we might also
-    # need the Docker image tags to sort properly, in which case we
-    # probably need to use some kind of timestamp?
-    #
-    # For the moment, just manual control, for testing.
+    with Docker("image", "ls", build_image_name, "--format", "{{.Tag}}",
+                stdout = subprocess.PIPE) as docker:
+        build_image_hashes = set(docker.stdout.read().split())
 
-    if not args.reuse_image:
+    build_image_exists = build_image_hash in build_image_hashes
+
+    make_build_image = args.force_image or not build_image_exists
+
+    if args.dont_clean:
+        build_image_hashes = { build_image_hash } if build_image_exists else set()
+
+    if not make_build_image:
+        build_image_hashes.discard(build_image_hash)
+
+    for h in build_image_hashes:
+        with Docker("rmi", "{}:{}".format(build_image_name, h)):
+            pass
+
+    if make_build_image:
 
         with tempdir() as dn:
             equivs = subprocess.Popen(("equivs-build", "/dev/stdin"),
