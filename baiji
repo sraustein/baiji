@@ -161,7 +161,12 @@ def build(args):
     dummy = debian.deb822.Deb822()
     dummy_name = "baiji-depends-" + dsc["Source"]
     dummy_fn = "{}_{}_all.deb".format(dummy_name, dsc["Version"])
-    dummy["Depends"] = dsc["Build-Depends"]
+    dummy["Depends"] = ", ".join(dsc[i]
+                                 for i in ("Build-Depends",
+                                           "Build-Depends-Indep",
+                                           "Build-Depends-Arch")
+                                 if i in dsc)
+
     dummy["Package"] = dummy_name
     for tag in ("Version", "Maintainer", "Homepage"):
         dummy[tag] = dsc[tag]
