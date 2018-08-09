@@ -174,26 +174,27 @@ def build(args):
     for tag in ("Version", "Maintainer", "Homepage"):
         dummy[tag] = dsc[tag]
 
-    build_image_name = "baiji/build/{}/{}".format(dsc["Source"], dsc["Version"])
     build_image_hash = hashlib.sha1(dummy["Depends"]).hexdigest()
-    build_image      = "{}:{}".format(build_image_name, build_image_hash)
+    build_image_name = "baiji/build/{}".format(dsc["Source"])
+    build_image_vers = "{}-{}".format(dsc["Version"], build_image_hash)
+    build_image      = "{}:{}".format(build_image_name, build_image_vers)
 
     with Docker("image", "ls", build_image_name, "--format", "{{.Tag}}",
                 stdout = subprocess.PIPE) as docker:
-        build_image_hashes = set(docker.stdout.read().split())
+        build_image_versions = set(docker.stdout.read().split())
 
-    build_image_exists = build_image_hash in build_image_hashes
+    build_image_exists = build_image_vers in build_image_versions
 
     make_build_image = args.force_image or not build_image_exists
 
     if args.dont_clean:
-        build_image_hashes = { build_image_hash } if build_image_exists else set()
+        build_image_versions = { build_image_vers } if build_image_exists else set()
 
     if not make_build_image:
-        build_image_hashes.discard(build_image_hash)
+        build_image_versions.discard(build_image_vers)
 
-    for h in build_image_hashes:
-        with Docker("rmi", "{}:{}".format(build_image_name, h)):
+    for v in build_image_versions:
+        with Docker("rmi", "{}:{}".format(build_image_name, v)):
             pass
 
     if make_build_image:
