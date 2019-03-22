@@ -88,10 +88,12 @@ def fakeroot_filter(info):
 
 # Commands
 
-@cmd(arg("--dist", default = "jessie",
+@cmd(arg("--dist",   default = "jessie",
          help = "distribution for base docker image"),
-     arg("--tag",  default = "baiji:jessie",
+     arg("--tag",    default = "baiji:jessie",
          help = "tag to use for constructed base docker image"),
+     arg("--mirror", default = "http://deb.debian.org/debian/",
+         help = "mirror URL to pull packages from"),
 )
 def create(args):
     """
@@ -103,7 +105,8 @@ def create(args):
 
     with tempdir() as dn:
         subprocess.check_call(("fakeroot", "/usr/sbin/debootstrap",
-                               "--foreign", "--variant=buildd", args.dist, dn))
+                               "--foreign", "--variant=buildd",
+                               args.dist, dn, args.mirror))
         with Docker("import", "-", args.tag, stdin = subprocess.PIPE) as docker:
             with tarfile.open(mode = "w|", fileobj = docker.stdin) as tar:
                 tar.add(dn, ".", filter = fakeroot_filter)
