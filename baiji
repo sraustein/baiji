@@ -240,7 +240,7 @@ def build(args):
                     #!/bin/bash -
                     set -eo pipefail
                     arch=`dpkg-architecture -qDEB_BUILD_ARCH`
-                    dpkg-source -x /source/{source}_{version}.dsc
+                    dpkg-source -x /source/{source}_{version}.dsc {source}-{version}
                     cd {source}-{version}
                     dpkg-buildpackage -b -uc -us 2>&1 | tee ../{source}_{version}_$arch.build
                     cd ..
