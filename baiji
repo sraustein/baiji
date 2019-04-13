@@ -161,7 +161,7 @@ def build(args):
 
     if args.dsc is None:
         try:
-            subprocess.check_call(("dpkg-buildpackage", "-S", "-us", "-uc", "-rfakeroot"))
+            subprocess.check_call(("dpkg-buildpackage", "-S", "-d", "-us", "-uc", "-rfakeroot"))
         except Exception as e:
             sys.exit("Couldn't build source package: {!s}".format(e))
         try:
