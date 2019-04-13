@@ -97,6 +97,10 @@ def fakeroot_filter(info):
          help = "mirror URL to pull packages from"),
      arg("--components", default = ["main"], nargs = "+",
          help = "repository components to use"),
+     arg("--lists", nargs = "+",
+         help = "additional files with sources.list entries"),
+     arg("--keyrings", nargs = "+",
+         help = "additional gpg keyring files"),
 )
 def create(args):
     """
@@ -111,6 +115,13 @@ def create(args):
                                "--foreign", "--variant=buildd",
                                "--components={}".format(",".join(args.components)),
                                args.dist, dn, args.mirror))
+        for files, aptdir in ((args.lists,    "sources.list.d"),
+                              (args.keyrings, "trusted.gpg.d")):
+            if files is not None:
+                d = os.path.join(dn, "etc", "apt", aptdir)
+                os.makedirs(d)
+                for f in files:
+                    shutil.copy(f, d)
         with Docker("import", "-", args.tag, stdin = subprocess.PIPE) as docker:
             with tarfile.open(mode = "w|", fileobj = docker.stdin) as tar:
                 tar.add(dn, ".", filter = fakeroot_filter)
