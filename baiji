@@ -25,6 +25,7 @@ import hashlib
 import shutil
 import sys
 import os
+import re
 
 # Python decorator voodoo to simplify argparse subparser setup.
 
@@ -190,7 +191,7 @@ def build(args):
 
     build_image_hash = hashlib.sha1(dummy["Depends"]).hexdigest()
     build_image_name = "baiji/build/{}".format(dsc["Source"])
-    build_image_vers = "{}-{}".format(dsc["Version"], build_image_hash)
+    build_image_vers = "{}-{}".format(re.sub("[^\w.-]", "_", dsc["Version"]), build_image_hash)
     build_image      = "{}:{}".format(build_image_name, build_image_vers)
 
     with Docker("image", "ls", build_image_name, "--format", "{{.Tag}}",
