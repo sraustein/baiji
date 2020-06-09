@@ -86,12 +86,25 @@ def fakeroot_filter(info):
     info.uid   = info.gid   = 0
     return info
 
+# Sensible argument defaults for system-specific values
+
+def query_default(*cmd):
+    try:
+        return subprocess.check_output(cmd).strip()
+    except:
+        return None
+
+default_dist = query_default("lsb_release", "-cs")
+default_arch = query_default("dpkg-architecture", "-q", "DEB_BUILD_ARCH")
+
 
 # Commands
 
-@cmd(arg("--dist", default = "jessie",
+@cmd(arg("--arch", default = default_arch,
+         help = "architecture for base  docker image"),
+     arg("--dist", default = default_dist,
          help = "distribution for base docker image"),
-     arg("--tag",  default = "baiji:jessie",
+     arg("--tag",
          help = "tag to use for constructed base docker image"),
      arg("--mirror", default = "",
          help = "mirror URL to pull packages from"),
@@ -110,10 +123,14 @@ def create(args):
     setup to include git, build-essentials, and fakeroot.
     """
 
+    if args.tag is None:
+        args.tag = "baiji:{0.dist}-{0.arch}".format(args)
+
     with tempdir() as dn:
         subprocess.check_call(("fakeroot", "/usr/sbin/debootstrap",
                                "--foreign", "--variant=buildd",
                                "--components={}".format(",".join(args.components)),
+                               "--arch={}".format(args.arch),
                                args.dist, dn, args.mirror))
         for files, aptdir in ((args.lists,    "sources.list.d"),
                               (args.keyrings, "trusted.gpg.d")):
@@ -134,6 +151,7 @@ def create(args):
             RUN apt-get update && \\
                 apt-get install -y --no-install-recommends build-essential fakeroot git apt-utils
             RUN useradd -U -m -d /build baiji
+            ENV DIST={args.dist}
             WORKDIR /build
         '''.format(args = args)))
 
